@@ -1,0 +1,7 @@
+environment = "production"
+region = "ap-south-1"
+ami_id = "REPLACE_WITH_TESTED_AL2023_X86_64_AMI"
+certificate_arn = "arn:aws:acm:ap-south-1:123456789012:certificate/REPLACE"
+allowed_cidrs = ["203.0.113.10/32"] # Replace with your corporate/VPN public IP.
+alert_email = "REPLACE@example.com"
+backup_role_arn = "arn:aws:iam::123456789012:role/autoapp-backup"

@@ -1,0 +1,97 @@
+name: Terraform
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, production]
+        required: true
+      apply:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: terraform-${{ inputs.environment || github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.14.0
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+      - run: terraform -chdir=bootstrap init -backend=false
+      - run: terraform -chdir=bootstrap validate
+  plan:
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_VAR_environment: ${{ inputs.environment }}
+      TF_VAR_region: ${{ vars.AWS_REGION }}
+      TF_VAR_ami_id: ${{ vars.AMI_ID }}
+      TF_VAR_certificate_arn: ${{ vars.CERTIFICATE_ARN }}
+      TF_VAR_allowed_cidrs: ${{ vars.ALLOWED_CIDRS }}
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+      TF_VAR_backup_role_arn: ${{ vars.BACKUP_ROLE_ARN }}
+      STATE_BUCKET: ${{ vars.STATE_BUCKET }}
+      DEPLOY_ENV: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Enforce branch mapping
+        run: |
+          test "$GITHUB_REF_NAME" = "$DEPLOY_ENV"
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.14.0
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Initialize remote state
+        run: terraform init -backend-config="bucket=$STATE_BUCKET" -backend-config="key=$DEPLOY_ENV/terraform.tfstate" -backend-config="region=$TF_VAR_region" -backend-config="encrypt=true" -backend-config="use_lockfile=true"
+      - run: terraform plan -lock-timeout=5m -out=deployment.tfplan
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: terraform-plan-${{ inputs.environment }}
+          path: deployment.tfplan
+          retention-days: 1
+  apply:
+    if: github.event_name == 'workflow_dispatch' && inputs.apply
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: ${{ format('{0}-infra-apply', inputs.environment) }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      STATE_BUCKET: ${{ vars.STATE_BUCKET }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      DEPLOY_ENV: ${{ inputs.environment }}
+      TF_IN_AUTOMATION: 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: 1.14.0
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: terraform-plan-${{ inputs.environment }}
+      - run: terraform init -backend-config="bucket=$STATE_BUCKET" -backend-config="key=$DEPLOY_ENV/terraform.tfstate" -backend-config="region=$AWS_REGION" -backend-config="encrypt=true" -backend-config="use_lockfile=true"
+      - run: terraform apply -lock-timeout=5m deployment.tfplan
+      - run: terraform output -json
